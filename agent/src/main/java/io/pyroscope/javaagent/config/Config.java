@@ -37,6 +37,8 @@ public final class Config {
     private static final String PYROSCOPE_EXPORT_COMPRESSION_LEVEL_LABELS = "PYROSCOPE_EXPORT_COMPRESSION_LEVEL_LABELS";
     private static final String PYROSCOPE_ALLOC_LIVE = "PYROSCOPE_ALLOC_LIVE";
     private static final String PYROSCOPE_GC_BEFORE_DUMP = "PYROSCOPE_GC_BEFORE_DUMP";
+    private static final String PYROSCOPE_SAMPLING_RATE = "PYROSCOPE_SAMPLING_RATE";
+    private static final String PYROSCOPE_SAMPLING_DURATION = "PYROSCOPE_SAMPLING_DURATION";
 
     public static final String DEFAULT_SPY_NAME = "javaspy";
     private static final Duration DEFAULT_PROFILING_INTERVAL = Duration.ofMillis(10);
@@ -54,6 +56,7 @@ public final class Config {
     private static final String DEFAULT_LABELS = "";
     private static final boolean DEFAULT_ALLOC_LIVE = false;
     private static final boolean DEFAULT_GC_BEFORE_DUMP = false;
+    private static final Duration DEFAULT_SAMPLING_DURATION = null;
 
     public final String applicationName;
     public final Duration profilingInterval;
@@ -77,6 +80,7 @@ public final class Config {
 
     public final boolean allocLive;
     public final boolean gcBeforeDump;
+    public final Duration samplingDuration;
 
     Config(final String applicationName,
            final Duration profilingInterval,
@@ -94,7 +98,8 @@ public final class Config {
            int compressionLevelJFR,
            int compressionLevelLabels,
            boolean allocLive,
-           boolean gcBeforeDump) {
+           boolean gcBeforeDump,
+           Duration samplingDuration) {
         this.applicationName = applicationName;
         this.profilingInterval = profilingInterval;
         this.profilingEvent = profilingEvent;
@@ -109,6 +114,7 @@ public final class Config {
         this.compressionLevelLabels = validateCompressionLevel(compressionLevelLabels);
         this.allocLive = allocLive;
         this.gcBeforeDump = gcBeforeDump;
+        this.samplingDuration = samplingDuration;
         this.timeseries = timeseriesName(AppName.parse(applicationName), profilingEvent, format);
         this.timeseriesName = timeseries.toString();
         this.format = format;
@@ -141,6 +147,7 @@ public final class Config {
             ", compressionLevelJFR=" + compressionLevelJFR +
             ", compressionLevelLabels=" + compressionLevelLabels +
             ", allocLive=" + allocLive +
+            ", samplingDuration=" + samplingDuration +
             '}';
     }
 
@@ -182,7 +189,9 @@ public final class Config {
             compressionLevel(configurationProvider, PYROSCOPE_EXPORT_COMPRESSION_LEVEL_JFR),
             compressionLevel(configurationProvider, PYROSCOPE_EXPORT_COMPRESSION_LEVEL_LABELS),
             allocLive,
-            bool(configurationProvider, PYROSCOPE_GC_BEFORE_DUMP, DEFAULT_GC_BEFORE_DUMP));
+            bool(configurationProvider, PYROSCOPE_GC_BEFORE_DUMP, DEFAULT_GC_BEFORE_DUMP),
+            samplingDuration(configurationProvider)
+        );
     }
 
     private static String applicationName(ConfigurationProvider configurationProvider) {
@@ -415,7 +424,47 @@ public final class Config {
         throw new IllegalArgumentException(String.format("wrong deflate compression level %d", level));
     }
 
+    private static Duration samplingDuration(ConfigurationProvider configurationProvider) {
+        Duration uploadInterval = uploadInterval(configurationProvider);
+
+        final String samplingDurationStr = configurationProvider.get(PYROSCOPE_SAMPLING_DURATION);
+        if (samplingDurationStr != null && !samplingDurationStr.isEmpty()) {
+            try {
+                Duration samplingDuration = IntervalParser.parse(samplingDurationStr);
+                if (samplingDuration.compareTo(uploadInterval) > 0) {
+                    DefaultLogger.PRECONFIG_LOGGER.log(Logger.Level.WARN, "Invalid %s value %s, ignore it",
+                        PYROSCOPE_SAMPLING_DURATION, samplingDurationStr);
+                } else {
+                    return samplingDuration;
+                }
+            } catch (final NumberFormatException e) {
+                DefaultLogger.PRECONFIG_LOGGER.log(Logger.Level.WARN, "Invalid %s value %s, ignore it",
+                    PYROSCOPE_SAMPLING_DURATION, samplingDurationStr);
+            }
+            return DEFAULT_SAMPLING_DURATION;
+        }
+
+        final String samplingRateStr = configurationProvider.get(PYROSCOPE_SAMPLING_RATE);
+        if (samplingRateStr == null || samplingRateStr.isEmpty()) {
+            return DEFAULT_SAMPLING_DURATION;
+        }
+        try {
+            double samplingRate = Double.parseDouble(samplingRateStr);
+            if (samplingRate <= 0.0 || samplingRate >= 1.0) {
+                return DEFAULT_SAMPLING_DURATION;
+            }
+            long uploadIntervalMillis = uploadInterval.toMillis();
+            long samplingDurationMillis = Math.min(uploadIntervalMillis, Math.round(uploadIntervalMillis * samplingRate));
+            return Duration.ofMillis(samplingDurationMillis);
+        } catch (final NumberFormatException e) {
+            DefaultLogger.PRECONFIG_LOGGER.log(Logger.Level.WARN, "Invalid %s value %s, ignore it",
+                PYROSCOPE_SAMPLING_RATE, samplingRateStr);
+            return DEFAULT_SAMPLING_DURATION;
+        }
+    }
+
     public static class Builder {
+
         public String applicationName = null;
         public Duration profilingInterval = DEFAULT_PROFILING_INTERVAL;
         public EventType profilingEvent = DEFAULT_PROFILER_EVENT;
@@ -433,6 +482,8 @@ public final class Config {
         public int compressionLevelLabels = DEFAULT_COMPRESSION_LEVEL;
         public boolean allocLive = DEFAULT_ALLOC_LIVE;
         public boolean gcBeforeDump = DEFAULT_GC_BEFORE_DUMP;
+        public Duration samplingDuration = DEFAULT_SAMPLING_DURATION;
+
         public Builder() {
         }
 
@@ -452,6 +503,7 @@ public final class Config {
             compressionLevelLabels = buildUpon.compressionLevelLabels;
             allocLive = buildUpon.allocLive;
             gcBeforeDump = buildUpon.gcBeforeDump;
+            samplingDuration = buildUpon.samplingDuration;
         }
 
         public Builder setApplicationName(String applicationName) {
@@ -539,6 +591,11 @@ public final class Config {
             return this;
         }
 
+        public Builder setSamplingDuration(Duration samplingDuration) {
+            this.samplingDuration = samplingDuration;
+            return this;
+        }
+
         public Config build() {
             if (applicationName == null || applicationName.isEmpty()) {
                 applicationName = generateApplicationName();
@@ -559,7 +616,9 @@ public final class Config {
                 compressionLevelJFR,
                 compressionLevelLabels,
                 allocLive,
-                gcBeforeDump);
+                gcBeforeDump,
+                samplingDuration
+            );
         }
     }
 }
